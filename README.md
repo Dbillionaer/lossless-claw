@@ -74,17 +74,19 @@ LCM is configured through a combination of plugin config and environment variabl
 
 ### Plugin config
 
-Add an `lossless-claw` block under `plugins.config` in your OpenClaw config:
+Add a `lossless-claw` entry under `plugins.entries` in your OpenClaw config:
 
 ```json
 {
   "plugins": {
-    "config": {
+    "entries": {
       "lossless-claw": {
         "enabled": true,
-        "freshTailCount": 32,
-        "contextThreshold": 0.75,
-        "incrementalMaxDepth": -1
+        "config": {
+          "freshTailCount": 32,
+          "contextThreshold": 0.75,
+          "incrementalMaxDepth": -1
+        }
       }
     }
   }
