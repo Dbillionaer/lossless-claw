@@ -758,12 +758,7 @@ function messageIdentity(role: string, content: string): string {
 // ── LcmContextEngine ────────────────────────────────────────────────────────
 
 export class LcmContextEngine implements ContextEngine {
-  readonly info: ContextEngineInfo = {
-    id: "lcm",
-    name: "Lossless Context Management Engine",
-    version: "0.1.0",
-    ownsCompaction: true,
-  };
+  readonly info: ContextEngineInfo;
 
   private config: LcmConfig;
 
@@ -796,7 +791,46 @@ export class LcmContextEngine implements ContextEngine {
 
     this.fts5Available = getLcmDbFeatures(this.db).fts5Available;
 
-    this.conversationStore = new ConversationStore(this.db, { fts5Available: this.fts5Available });
+    // Run migrations eagerly at construction time so the schema exists
+    // before any lifecycle hook fires.
+    let migrationOk = false;
+    try {
+      runLcmMigrations(this.db, { fts5Available: this.fts5Available });
+      this.migrated = true;
+
+      // Verify tables were actually created
+      const tables = this.db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .all() as Array<{ name: string }>;
+      if (tables.length === 0) {
+        this.deps.log.warn(
+          "[lcm] Migration completed but database has zero tables — DB may be non-functional",
+        );
+      } else {
+        migrationOk = true;
+        this.deps.log.debug(
+          `[lcm] Migration successful — ${tables.length} tables: ${tables.map((t) => t.name).join(", ")}`,
+        );
+      }
+    } catch (err) {
+      this.deps.log.error(
+        `[lcm] Migration failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Only claim ownership of compaction when the DB is operational.
+    // Without a working schema, ownsCompaction would disable the runtime's
+    // built-in compaction safeguard and inflate the context budget.
+    this.info = {
+      id: "lcm",
+      name: "Lossless Context Management Engine",
+      version: "0.1.0",
+      ownsCompaction: migrationOk,
+    };
+
+    this.conversationStore = new ConversationStore(this.db, {
+      fts5Available: this.fts5Available,
+    });
     this.summaryStore = new SummaryStore(this.db, { fts5Available: this.fts5Available });
 
     if (!this.fts5Available) {
@@ -928,9 +962,10 @@ export class LcmContextEngine implements ContextEngine {
   /** Resolve token budget from direct params or legacy fallback input. */
   private resolveTokenBudget(params: {
     tokenBudget?: number;
+    runtimeContext?: Record<string, unknown>;
     legacyParams?: Record<string, unknown>;
   }): number | undefined {
-    const lp = params.legacyParams ?? {};
+    const lp = asRecord(params.runtimeContext) ?? params.legacyParams ?? {};
     if (
       typeof params.tokenBudget === "number" &&
       Number.isFinite(params.tokenBudget) &&
@@ -1743,9 +1778,9 @@ export class LcmContextEngine implements ContextEngine {
       }
 
       const legacyParams = asRecord(params.runtimeContext) ?? params.legacyParams;
-
       const tokenBudget = this.resolveTokenBudget({
         tokenBudget: params.tokenBudget,
+        runtimeContext: params.runtimeContext,
         legacyParams,
       });
       if (!tokenBudget) {
@@ -1852,6 +1887,7 @@ export class LcmContextEngine implements ContextEngine {
       const forceCompaction = force || manualCompactionRequested;
       const tokenBudget = this.resolveTokenBudget({
         tokenBudget: params.tokenBudget,
+        runtimeContext: params.runtimeContext,
         legacyParams,
       });
       if (!tokenBudget) {
